@@ -291,14 +291,16 @@ class Sink {
 	}
 	circle(cx, cy, r, n = 12) { this.ellipse(cx, cy, r, r, 0, n); }
 }
+const NO_DANCE = [0, 0, 0]; // dance attribute: [building centre x, building index, 1 = dances at the disco]
 class StaticSink extends Sink {
-	constructor() { super(); this.p = []; this.c = []; this.n = []; }
-	v(x, y, z, r, g, b, h) { this.p.push(x, y, z); this.c.push(r, g, b); this.n.push(h); }
+	constructor() { super(); this.p = []; this.c = []; this.n = []; this.d = []; this.dance = NO_DANCE; }
+	v(x, y, z, r, g, b, h) { this.p.push(x, y, z); this.c.push(r, g, b); this.n.push(h); this.d.push(...this.dance); }
 	build(mat = lineMat) {
 		const geo = new THREE.BufferGeometry();
 		geo.setAttribute('position', new THREE.Float32BufferAttribute(this.p, 3));
 		geo.setAttribute('color', new THREE.Float32BufferAttribute(this.c, 3));
 		geo.setAttribute('neon', new THREE.Float32BufferAttribute(this.n, 1));
+		geo.setAttribute('dance', new THREE.Float32BufferAttribute(this.d, 3));
 		return new THREE.LineSegments(geo, mat);
 	}
 }
@@ -310,6 +312,7 @@ class DynSink extends Sink {
 		geo.setAttribute('position', new THREE.BufferAttribute(this.pos, 3).setUsage(THREE.DynamicDrawUsage));
 		geo.setAttribute('color', new THREE.BufferAttribute(this.col, 3).setUsage(THREE.DynamicDrawUsage));
 		geo.setAttribute('neon', new THREE.BufferAttribute(this.neo, 1).setUsage(THREE.DynamicDrawUsage));
+		geo.setAttribute('dance', new THREE.BufferAttribute(new Float32Array(max * 3), 3)); // never dances
 		this.obj = new THREE.LineSegments(geo, lineMat); this.obj.frustumCulled = false;
 	}
 	seg(x1, y1, x2, y2) { if (this.n + 2 <= this.max) super.seg(x1, y1, x2, y2); }
@@ -318,11 +321,12 @@ class DynSink extends Sink {
 	end() { const a = this.geo.attributes; this.geo.setDrawRange(0, this.n); a.position.needsUpdate = a.color.needsUpdate = a.neon.needsUpdate = true; }
 }
 class Fill {
-	constructor() { this.p = []; }
-	tri(ax, ay, bx, by, cx, cy, z) { this.p.push(ax, -ay, z, bx, -by, z, cx, -cy, z); }
+	constructor() { this.p = []; this.d = []; this.dance = NO_DANCE; }
+	tri(ax, ay, bx, by, cx, cy, z) { this.p.push(ax, -ay, z, bx, -by, z, cx, -cy, z); for (let i = 0; i < 3; i++) this.d.push(...this.dance); }
 	rect(x, y, w, h, z) { this.tri(x, y, x + w, y, x + w, y + h, z); this.tri(x, y, x + w, y + h, x, y + h, z); }
 	build(color, neon = true) {
 		const geo = new THREE.BufferGeometry(); geo.setAttribute('position', new THREE.Float32BufferAttribute(this.p, 3));
+		geo.setAttribute('dance', new THREE.Float32BufferAttribute(this.d, 3));
 		const mat = new THREE.MeshBasicMaterial({ color, side: THREE.DoubleSide });
 		if (neon) spotlit(mat, false);
 		return new THREE.Mesh(geo, mat);
@@ -342,13 +346,21 @@ const SPOT_HALF = 30 * Math.PI / 180, SPOT_TILT = 25 * Math.PI / 180, SPOT_LEN =
 const spotU = {
 	uApex: { value: new THREE.Vector2() }, uDir: { value: new THREE.Vector2(0, -1) },
 	uTan: { value: Math.tan(SPOT_HALF) }, uLen: { value: SPOT_LEN }, uOn: { value: 0 }, uTime: { value: 0 },
+	uDance: { value: 0 }, uBeats: { value: 0 }, uKick: { value: 0 }, // disco: buildings dance to the moon's beat
 };
 const glv = c => { const v = new THREE.Color(c); return `vec3(${v.r.toFixed(4)}, ${v.g.toFixed(4)}, ${v.b.toFixed(4)})`; }; // Color() gives linear
 const NEON_GLSL = 'vec3 neonPal(float i) {\n' + NEON.map((c, i) => `\tif (i < ${i}.5) return ${glv(c)};`).join('\n') + `\n\treturn ${glv(NEON[0])};\n}`;
 function spotlit(mat, isLine) {
 	mat.onBeforeCompile = sh => {
 		Object.assign(sh.uniforms, spotU);
-		sh.vertexShader = (isLine ? 'attribute float neon;\nvarying float vNeon;\n' : '') + 'varying vec2 vWorld;\n' + sh.vertexShader.replace('#include <project_vertex>',
+		sh.vertexShader = (isLine ? 'attribute float neon;\nvarying float vNeon;\n' : '') + 'varying vec2 vWorld;\nattribute vec3 dance;\nuniform float uDance, uBeats, uKick;\n' + sh.vertexShader
+			.replace('#include <begin_vertex>', `#include <begin_vertex>
+			if (dance.z > 0.5 && uDance > 0.0) { // mirrors danceXY(): lean from the street in a wave down the block, alternate buildings stretch / squash on the kick
+				float hy = transformed.y + ${GROUND.toFixed(1)}, s = 1.0 + uDance * uKick * (mod(dance.y, 2.0) < 1.0 ? 0.1 : -0.07);
+				transformed.x = dance.x + (transformed.x - dance.x) / s + hy * cos(uBeats * 3.14159 - dance.y * 0.7) * 0.1 * uDance;
+				transformed.y = hy * s - ${GROUND.toFixed(1)};
+			}`)
+			.replace('#include <project_vertex>',
 			'#include <project_vertex>\nvWorld = (modelMatrix * vec4(transformed, 1.0)).xy;' + (isLine ? '\nvNeon = neon;' : ''));
 		sh.fragmentShader = 'uniform vec2 uApex, uDir;\nuniform float uTan, uLen, uOn, uTime;\nvarying vec2 vWorld;\n' + (isLine ? 'varying float vNeon;\n' : '') + NEON_GLSL + '\n' +
 			sh.fragmentShader.replace('#include <color_fragment>', `#include <color_fragment>
@@ -368,7 +380,7 @@ function spotlit(mat, isLine) {
 					: `diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.035, 0.004, 0.06), k);`}
 			}`);
 	};
-	mat.customProgramCacheKey = () => 'spotlit' + isLine;
+	mat.customProgramCacheKey = () => 'spotlit-dance' + isLine;
 	return mat;
 }
 const lineMat = spotlit(new THREE.LineBasicMaterial({ vertexColors: true }), true);
@@ -452,12 +464,14 @@ const glowGeo = new THREE.PlaneGeometry(1, 1);
 glowGeo.setAttribute('color', new THREE.Float32BufferAttribute([0, 0, 0, 0, 0, 0, 0.9, 0.18, 0.02, 0.9, 0.18, 0.02], 3)); // top-left, top-right, bottom-left, bottom-right
 const fireGlow = new THREE.Mesh(glowGeo, new THREE.MeshBasicMaterial({ vertexColors: true, blending: THREE.AdditiveBlending, transparent: true, depthWrite: false }));
 fireGlow.position.z = -22; fireGlow.frustumCulled = false; scene.add(fireGlow);
-const moonU = { uT: { value: 0 } };
+const moonU = { uT: { value: 0 }, uDisco: { value: 0 }, uDT: { value: 0 }, uBeat: { value: 0 }, uStrobe: { value: 0 } }; // uDisco 0..1 = level-clear disco mode, uDT = disco clock, uBeat = kick envelope
+const RGB_COS = 'vec3 rgbCos(float h) { return 0.5 + 0.5 * cos(6.2831 * (vec3(0.0, 0.33, 0.67) + h)); }';
 const moonVert = `varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`;
 const moonHalo = new THREE.Mesh(new THREE.PlaneGeometry(8, 8), new THREE.ShaderMaterial({
 	uniforms: moonU, vertexShader: moonVert, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
 	fragmentShader: `
-		uniform float uT; varying vec2 vUv;
+		uniform float uT, uDisco, uDT, uBeat; varying vec2 vUv;
+		${RGB_COS}
 		void main() {
 			vec2 p = (vUv * 2.0 - 1.0) * 4.0; float r = length(p), a = atan(p.y, p.x), e = max(r - 1.0, 0.0);
 			float glow = exp(-e * 1.2) * 0.5 + exp(-e * 5.0) * 0.7;
@@ -466,13 +480,19 @@ const moonHalo = new THREE.Mesh(new THREE.PlaneGeometry(8, 8), new THREE.ShaderM
 			float pulse = 0.85 + 0.15 * sin(uT * 1.7);
 			vec3 tint = mix(vec3(1.0, 0.45, 0.95), vec3(0.45, 0.95, 1.0), 0.5 + 0.5 * sin(a * 2.0 + uT * 0.6));
 			vec3 col = vec3(0.55, 0.72, 1.0) * glow * pulse + tint * rays;
+			if (uDisco > 0.0) { // disco: fast counter-spinning rainbow rays, glow pumping on the kick
+				float dr = pow(max(sin(a * 6.0 + uDT * 2.5), 0.0), 8.0) + pow(max(sin(a * 11.0 - uDT * 3.7), 0.0), 14.0) * 0.8;
+				dr *= exp(-e * 0.4) * step(1.0, r);
+				col += uDisco * (rgbCos(a / 6.2831 * 2.0 + uDT * 0.5) * dr * 1.8 + rgbCos(uDT * 0.9) * glow * (0.8 + 2.5 * uBeat));
+			}
 			gl_FragColor = vec4(col * smoothstep(4.0, 2.6, r), 1.0);
 		}` }));
 moonHalo.position.z = -19.6; // in front of the distant skyline (z -20), behind the real city (z -2)
 const moonDisc = new THREE.Mesh(new THREE.CircleGeometry(1, 96), new THREE.ShaderMaterial({
 	uniforms: moonU, vertexShader: moonVert,
 	fragmentShader: `
-		uniform float uT; varying vec2 vUv;
+		uniform float uT, uDisco, uDT, uBeat; varying vec2 vUv;
+		${RGB_COS}
 		float crater(vec2 p, vec2 c, float r) { float d = length(p - c) / r; return smoothstep(1.0, 0.75, d) * (0.55 + 0.45 * smoothstep(0.2, 0.9, d)); }
 		void main() {
 			vec2 p = vUv * 2.0 - 1.0; float r2 = dot(p, p);
@@ -488,6 +508,16 @@ const moonDisc = new THREE.Mesh(new THREE.CircleGeometry(1, 96), new THREE.Shade
 			vec3 irid = 0.5 + 0.5 * cos(6.2831 * (vec3(0.0, 0.33, 0.67) + band * 0.25 + r2 * 0.6)); // mother-of-pearl sheen
 			vec3 col = base + spec + fres * mix(vec3(0.6, 0.85, 1.0), irid, 0.65) * 1.3 + irid * 0.1 * diff;
 			col += vec3(1.0) * pow(max(sin(p.x * 6.0 + p.y * 3.0 - uT * 2.3), 0.0), 60.0) * 0.35 * diff; // shimmering sweep
+			if (uDisco > 0.0) { // disco: the moon turns into a spinning mirror ball, every tile flashing its own colour
+				vec2 sp = vec2(atan(n.x, n.z) + uDT * 0.9, asin(clamp(n.y, -1.0, 1.0))) * 6.0;
+				vec2 cell = floor(sp), f = fract(sp);
+				float h = fract(sin(dot(cell, vec2(12.9898, 78.233))) * 43758.5453);
+				float flash = pow(max(sin(uDT * 7.0 + h * 40.0), 0.0), 10.0);
+				float grout = smoothstep(0.0, 0.1, f.x) * smoothstep(1.0, 0.9, f.x) * smoothstep(0.0, 0.1, f.y) * smoothstep(1.0, 0.9, f.y);
+				vec3 tile = rgbCos(h + uDT * 0.4);
+				vec3 ball = (tile * (0.3 + 0.9 * diff) + flash * 1.8 + spec) * grout + fres * rgbCos(uDT * 0.7 + r2) * 1.6;
+				col = mix(col, ball + rgbCos(uDT * 0.6 + r2 * 0.8) * 0.25, uDisco) * (1.0 + uBeat * 0.9 * uDisco);
+			}
 			gl_FragColor = vec4(col, 1.0);
 		}` }));
 moonDisc.position.z = -19.4;
@@ -498,11 +528,52 @@ const mgAttr = { position: new THREE.BufferAttribute(new Float32Array(MOON_GLINT
 for (const k in mgAttr) mgGeo.setAttribute(k, mgAttr[k].setUsage(THREE.DynamicDrawUsage));
 const mgMat = spMat.clone(); mgMat.depthTest = true;
 const moonGlints = new THREE.Points(mgGeo, mgMat); moonGlints.frustumCulled = false; moonGlints.position.z = -19.2;
-moon.add(moonHalo, moonDisc, moonGlints);
+// disco: sweeping rainbow spotlight beams fanning out from the moon (only shown once the level is clear)
+const discoBeams = new THREE.Mesh(new THREE.PlaneGeometry(44, 44), new THREE.ShaderMaterial({
+	uniforms: moonU, vertexShader: moonVert, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+	fragmentShader: `
+		uniform float uDisco, uDT, uBeat; varying vec2 vUv;
+		${RGB_COS}
+		void main() {
+			vec2 p = (vUv * 2.0 - 1.0) * 22.0; float r = length(p), a = atan(p.y, p.x);
+			vec3 col = vec3(0.0);
+			for (int i = 0; i < 7; i++) {
+				float fi = float(i), ang = fi * 0.8976 + uDT * 0.35 + sin(uDT * (0.7 + fi * 0.17) + fi * 2.0) * 1.1;
+				float da = abs(mod(a - ang + 3.14159, 6.28318) - 3.14159);
+				col += rgbCos(fi / 7.0 + uDT * 0.3) * (smoothstep(0.075, 0.0, da) + smoothstep(0.2, 0.0, da) * 0.3);
+			}
+			float fall = smoothstep(1.0, 1.8, r) * exp(-r * 0.06) * smoothstep(22.0, 15.0, r);
+			gl_FragColor = vec4(col * fall * uDisco * (0.3 + 0.45 * uBeat), 1.0);
+		}` }));
+discoBeams.position.z = -19.7; discoBeams.visible = false;
+// disco: the blinding bit — a glow from the moon plus kick wash and strobe, drawn additively in front of everything (one cheap GPU pass)
+const discoGlow = new THREE.Mesh(new THREE.PlaneGeometry(44, 44), new THREE.ShaderMaterial({
+	uniforms: moonU, vertexShader: moonVert, transparent: true, depthTest: false, depthWrite: false, blending: THREE.AdditiveBlending,
+	fragmentShader: `
+		uniform float uDisco, uDT, uBeat, uStrobe; varying vec2 vUv;
+		${RGB_COS}
+		void main() {
+			float r = length(vUv * 2.0 - 1.0) * 22.0;
+			vec3 col = rgbCos(uDT * 0.25) * exp(-r * 0.35) * (0.25 + 0.5 * uBeat)             // hot core round the moon
+			         + rgbCos(uDT * 0.25 + 0.17) * exp(-r * 0.09) * 0.12 * (0.5 + uBeat)       // wide bloom
+			         + rgbCos(uDT * 0.25 + 0.5) * 0.07 * uBeat + vec3(uStrobe);                 // colour wash on the kick, strobe once a bar
+			gl_FragColor = vec4(col * uDisco, 1.0);
+		}` }));
+discoGlow.position.z = 30; discoGlow.renderOrder = 20; discoGlow.visible = false;
+moon.add(discoBeams, moonHalo, moonDisc, moonGlints, discoGlow);
 function updateMoon() {
-	const R = Math.min(vw, vh) * 0.21;
-	moon.position.set(camX + vw * 0.27, -(camY - vh * 0.1), 0); moon.scale.set(R, R, 1);
-	moonU.uT.value = time;
+	const R = Math.min(vw, vh) * 0.21, d = disco < 0 ? 0 : Math.min(1, disco / 1.5), e = d * d * (3 - 2 * d);
+	moon.position.set(camX + vw * 0.27, -(camY - vh * 0.1), 0); moon.scale.set(R, R, 1); moon.rotation.z = 0;
+	moonU.uT.value = time; moonU.uDisco.value = e; spotU.uDance.value = e; discoBeams.visible = discoGlow.visible = e > 0;
+	if (e > 0) { // level clear: the moon swells, swings in and boogies — bounce on every beat, sway every two, squash on the kick
+		const b = disco / BEAT, kick = discoKick(), R2 = R * (1 + 0.55 * e) * (1 + 0.1 * kick);
+		moon.position.x += e * (-vw * 0.12 + Math.sin(b * Math.PI) * vw * 0.05);
+		moon.position.y += e * (-vh * 0.06 + Math.abs(Math.sin(b * Math.PI)) * vh * 0.05);
+		moon.scale.set(R2 * (1 + 0.12 * kick * e), R2 * (1 - 0.1 * kick * e), 1);
+		moon.rotation.z = Math.sin(b * Math.PI * 0.5) * 0.35 * e;
+		spotU.uBeats.value = b; spotU.uKick.value = kick;
+		moonU.uDT.value = disco; moonU.uBeat.value = kick; moonU.uStrobe.value = discoBeat % 4 === 3 ? 0.3 * kick : 0; // white strobe once a bar (well under 3 flashes/s)
+	}
 	const pos = mgAttr.position.array, col = mgAttr.scol.array, size = mgAttr.size.array, rot = mgAttr.rot.array;
 	for (let i = 0; i < MOON_GLINTS; i++) {
 		let x, y, sz, tw;
@@ -519,6 +590,11 @@ function updateMoon() {
 }
 const rainbow = h => { const c = new THREE.Color().setHSL(((h % 1) + 1) % 1, 1, 0.62); return [c.r, c.g, c.b]; };
 const NEON_RGB = NEON.map(h => { const c = new THREE.Color(h); return [c.r, c.g, c.b]; });
+function danceXY(x, y, b, bi) { // game coords (y down); must match the vertex shader in spotlit()
+	const e = spotU.uDance.value; if (!e) return [x, y];
+	const hy = GROUND - y, s = 1 + e * spotU.uKick.value * (bi % 2 < 1 ? 0.1 : -0.07), cx = b.x + b.w / 2;
+	return [cx + (x - cx) / s + hy * Math.cos(spotU.uBeats.value * Math.PI - bi * 0.7) * 0.1 * e, GROUND - hy * s];
+}
 function spark(x, y, o) { if (sparks.length < MAX_SPARK) sparks.push({ x, y, vx: 0, vy: 0, t: 0, life: 0.6, size: 12, rot: Math.random() * TAU, spin: 0, shape: 0, grav: 0, col: rainbow(Math.random()), tw: 0, ...o }); }
 // hearts + stars fountain (rescues, pickups)
 function joyBurst(x, y, big = 1) {
@@ -528,6 +604,70 @@ function joyBurst(x, y, big = 1) {
 		spark(x, y, { vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 1.2 + Math.random() * 0.9, size: 9 + Math.random() * 9, shape: i % 3 === 0 ? 1 : 0,
 			spin: (Math.random() - 0.5) * 6, grav: 160, col: rainbow(i / n + Math.random() * 0.1), rot: i % 3 === 0 ? 0 : Math.random() * TAU });
 	}
+}
+// ---------- level clear: DISCO MOON — mirror-ball moon, fireworks, streamers and a four-on-the-floor beat ----------
+const BEAT = 60 / 124;
+let disco = -1, discoBeat = -1, rockets = [], streamers = []; // disco = seconds since the level cleared (-1 = off)
+const discoKick = () => disco < 0 ? 0 : Math.exp(-(disco % BEAT) / BEAT * 5);
+function startDisco() { disco = 0; discoBeat = -1; rockets = []; streamers = []; for (let i = 0; i < 40; i++) popStreamer(i & 1); }
+function launchRocket() {
+	const x = camX + (Math.random() - 0.5) * vw * 0.9, y = camY + vh / 2 + 10, ty = camY - vh * (0.1 + Math.random() * 0.32);
+	const fuse = 0.9 + Math.random() * 0.5, g = vh * 0.5;
+	rockets.push({ x, y, vx: (Math.random() - 0.5) * vw * 0.08, vy: (ty - y - 0.5 * g * fuse * fuse) / fuse, g, t: 0, fuse, h: Math.random(), kind: (Math.random() * 5) | 0 });
+	tone(600 + Math.random() * 300, fuse * 0.9, { type: 'sine', vol: 0.015, slide: 2400 }); // whistle
+}
+function explode(r) {
+	const n = 70, v = vh * (0.28 + Math.random() * 0.12), h2 = r.h + 0.5;
+	for (let i = 0; i < n; i++) {
+		const a = i / n * TAU; let dx = Math.cos(a), dy = Math.sin(a), sp = v, col = rainbow(r.h + (i % 2) * 0.08), life = 1.3 + Math.random() * 0.6, grav = 70, shape = 0;
+		if (r.kind === 1) { sp *= 0.3 + Math.random() * 0.7; col = rainbow(Math.random()); }                                           // peony: every colour
+		else if (r.kind === 2) { dx = 16 * Math.sin(a) ** 3 / 16; dy = -(13 * Math.cos(a) - 5 * Math.cos(2 * a) - 2 * Math.cos(3 * a) - Math.cos(4 * a)) / 16; shape = i % 4 ? 0 : 1; } // heart
+		else if (r.kind === 3) { col = [1, 0.75, 0.3]; life = 2.4; grav = 140; sp *= 0.7; }                                           // gold willow
+		else if (r.kind === 4 && i % 2) { sp *= 0.55; col = rainbow(h2); }                                                             // two-ring
+		spark(r.x, r.y, { vx: dx * sp, vy: dy * sp, life, grav, drag: 1, size: 14 + Math.random() * 10, spin: (Math.random() - 0.5) * 6, col, shape, rot: shape ? 0 : Math.random() * TAU, tw: r.kind === 3 ? 20 : 0 });
+	}
+	spark(r.x, r.y, { life: 0.35, size: 140, col: [1, 1, 1] }); // the flash
+	noise(0.7, { vol: 0.25, freq: 900, to: 80 }); tone(90, 0.4, { type: 'sine', vol: 0.12, slide: 40 });
+	for (let i = 0; i < 8; i++) noise(0.03, { vol: 0.05, type: 'highpass', freq: 3000 + Math.random() * 3000, when: 0.25 + Math.random() * 0.8 }); // crackle
+}
+// streamers live in HUD pixels: party-popper bursts from the bottom corners, then a steady fall from the top
+function popStreamer(side) {
+	const u = Math.min(W, H) / 100, fromTop = side === undefined;
+	streamers.push({ x: fromTop ? Math.random() * W : side ? W + 10 : -10, y: fromTop ? -20 : H + 10,
+		vx: fromTop ? 0 : (side ? -1 : 1) * u * (25 + Math.random() * 50), vy: fromTop ? u * 5 : -u * (70 + Math.random() * 45),
+		u, hue: Math.random() * 360, w: u * (0.8 + Math.random() * 0.8), ph: Math.random() * TAU, pts: [] });
+}
+function updateDisco(dt) {
+	disco += dt;
+	const bi = Math.floor(disco / BEAT);
+	if (bi !== discoBeat) { discoBeat = bi; discoMusic(bi + 1, (bi + 1) * BEAT - disco); if (bi % 2 === 0 || Math.random() < 0.4) launchRocket(); if (bi % 8 === 7) for (let i = 0; i < 4; i++) launchRocket(); }
+	for (const r of rockets) {
+		r.t += dt; r.vy += r.g * dt; r.x += r.vx * dt; r.y += r.vy * dt;
+		spark(r.x, r.y, { vx: (Math.random() - 0.5) * 20, vy: 20, life: 0.5, size: 8 + Math.random() * 5, col: [1, 0.85, 0.6], grav: 40 });
+		if (r.t >= r.fuse) explode(r);
+	}
+	rockets = rockets.filter(r => r.t < r.fuse);
+	if (streamers.length < 60 && Math.random() < dt * 8) popStreamer();
+	for (const s of streamers) {
+		s.vy += s.u * 60 * dt; s.vx *= 1 - 1.2 * dt; s.vy = Math.min(s.vy, s.u * 14) - (s.vy < 0 ? s.vy * 1.2 * dt : 0);
+		s.x += (s.vx + Math.sin(time * 2.5 + s.ph) * s.u * 8) * dt; s.y += s.vy * dt;
+		if ((s.n = (s.n || 0) + 1) % 3 === 0) { s.pts.unshift(s.x, s.y); if (s.pts.length > 28) s.pts.length = 28; } // a point every 3 steps
+	}
+	streamers = streamers.filter(s => s.y < H + s.u * 40 || s.vy < 0);
+}
+// the beat, scheduled on the audio clock `when` seconds ahead so it doesn't wobble with the frame rate
+const DISCO_BASS = [110, 110, 87.31, 87.31, 130.81, 130.81, 98, 98]; // Am  F  C  G — two beats each
+const DISCO_CHORD = [[440, 523, 659], [349, 440, 523], [523, 659, 784], [392, 494, 587]];
+function discoMusic(b, when) {
+	if (disco < (L.boss ? 2.4 : 1.1)) return; // let the fanfare finish first
+	const bar = (b >> 2) & 1 ? 1 : 0, root = DISCO_BASS[b % 8];
+	tone(150, 0.22, { type: 'sine', vol: 0.3, slide: 42, when });                                           // kick
+	noise(0.05, { vol: 0.07, type: 'highpass', freq: 7000, when: when + BEAT / 2 });                          // open hat on the off-beat
+	noise(0.02, { vol: 0.04, type: 'highpass', freq: 9000, when: when + BEAT / 4 });
+	if (b % 2) noise(0.14, { vol: 0.13, type: 'bandpass', freq: 1400, q: 0.8, when });                       // clap on 2 and 4
+	tone(root, BEAT * 0.4, { type: 'sawtooth', vol: 0.05, when }); tone(root * 2, BEAT * 0.4, { type: 'sawtooth', vol: 0.05, when: when + BEAT / 2 }); // octave bass
+	if (b % 2 === 0) for (const f of DISCO_CHORD[(b >> 1) % 4]) tone(f, BEAT * 0.3, { type: 'triangle', vol: 0.025, when: when + BEAT * (bar ? 0.5 : 0) }); // string stabs
+	if (b % 8 === 7) for (let i = 0; i < 4; i++) tone(PENTA[(Math.random() * PENTA.length) | 0], 0.12, { type: 'sine', vol: 0.03, when: when + i * BEAT / 4 });
 }
 // where the searchlight is, in game coords (y down)
 function beamNow() { const sx = heli.x + heli.face * 12, sy = heli.y + 8, a = SPOT_TILT * heli.face; return { sx, sy, dx: Math.sin(a), dy: Math.cos(a) }; }
@@ -541,7 +681,7 @@ function beamPoint(B, a0, a1) {
 }
 let spawnAcc = { dust: 0, glint: 0 };
 function updateSparkles(dt) {
-	for (const p of sparks) { p.t += dt; p.vy += p.grav * dt; p.x += p.vx * dt; p.y += p.vy * dt; p.rot += p.spin * dt; p.vx *= 1 - 0.8 * dt; }
+	for (const p of sparks) { p.t += dt; p.vy += p.grav * dt; p.x += p.vx * dt; p.y += p.vy * dt; p.rot += p.spin * dt; p.vx *= 1 - 0.8 * dt; if (p.drag) p.vy *= 1 - p.drag * dt; }
 	sparks = sparks.filter(p => p.t < p.life);
 	if (L.boss && state === 'play') fireFx(dt);
 	if (heli.dead || state !== 'play') return;
@@ -819,10 +959,14 @@ function buildScene() {
 	lines.h = N_YELLOW; lines.i = 0.18; for (let x = -3000; x < L.worldW + 3000; x += 32) lines.seg(x, GROUND + 18, x + 14, GROUND + 18);
 	}
 	// the city is built in chunks of a few buildings so three can frustum-cull what's off screen
-	const flush = () => { if (lines.p.length) levelGroup.add(fill.build(0x06080b), lines.build()); lines = new StaticSink(); fill = new Fill(); };
+	const flush = () => {
+		if (lines.p.length) for (const o of [fill.build(0x06080b), lines.build()]) { o.geometry.computeBoundingSphere(); o.geometry.boundingSphere.radius += 150; levelGroup.add(o); }
+		lines = new StaticSink(); fill = new Fill();
+	};
 	flush();
 	L.buildings.forEach((b, bi) => {
 		if (bi % 6 === 0) flush();
+		lines.dance = fill.dance = [b.x + b.w / 2, bi, 1];
 		for (const t of b.tiers) fill.rect(t.x, t.y, t.w, t.h, -2);
 		lines.i = b.hospital ? 1 : 0.6; lines.h = b.hospital ? N_RED : (b.seed & 1 ? N_PINK : N_BLUE);
 		for (const t of b.tiers) lines.rect(t.x, t.y, t.w, t.h);
@@ -856,6 +1000,7 @@ function buildScene() {
 			lines.i = 0.6; lines.rect(s.x + 3, s.y + 6, 9, 16);
 		}
 	});
+	lines.dance = fill.dance = NO_DANCE;
 	flush();
 
 	// far skyline: rects run far below the ground so parallax never shows their bottoms
@@ -874,14 +1019,15 @@ function buildScene() {
 // ---------- game state ----------
 const params = new URLSearchParams(location.search);
 const baseSeed = parseInt(params.get('seed')) || 1;
-let level = 1, score = 0, levelStartScore = 0, crashes = 0, state = 'title', time = 0, camX = 0, camY = 0;
+let level = 1, score = 0, levelStartScore = 0, crashes = 0, state = 'title', time = 0, camX = 0, camY = 0, doneAt = 0;
+const DONE_LOCK = 5; // seconds the level-clear show plays before it can be dismissed
 let heli, hc, chains, particles, floats, walkers, stats, banner, checkpoint = null, wantCheckpoint = false;
 
 function startLevel(n, forceBoss) {
 	level = n; L = M.sphere ? genSphere(baseSeed + n - 1) : genLevel(baseSeed + n - 1, forceBoss || isBoss(n));
 	CEIL = L.sphere ? L.ceil : GROUND - M.maxSpire - M.clear;
 	levelStartScore = score; crashes = 0;
-	chains = []; particles = []; floats = []; walkers = []; sparks = [];
+	chains = []; particles = []; floats = []; walkers = []; sparks = []; disco = -1; rockets = []; streamers = [];
 	stats = { saved: 0, lost: 0, gone: 0, total: L.people.length };
 	banner = { text: L.boss ? 'BOSS: INFERNO — THE CITY IS ON FIRE!' : L.sphere ? 'DOGGO SPHERE — LIFT THE PILE!' : 'LEVEL ' + n, t: L.boss || L.sphere ? 3.5 : 2 };
 	renderer.setClearColor(L.boss ? 0x120303 : 0x030405);
@@ -1044,7 +1190,15 @@ addEventListener('keydown', e => {
 	}
 	if (e.code === 'KeyR' && state === 'play') { score = levelStartScore; startLevel(level, L.boss); return; }
 	if (state === 'title') { if (!e.repeat && window.__menuKey && window.__menuKey(e.code) === 'blip') menuBlip(); return; }
-	if (!e.repeat && state !== 'play' && (e.code === 'Enter' || e.code === 'Space' || KMAP[e.code])) advance();
+	if (state === 'paused') {
+		if (e.repeat) return;
+		if (e.code === 'Escape' || e.code === 'KeyP') resume();
+		else if (e.code === 'ArrowUp' || e.code === 'ArrowDown' || e.code === 'KeyW' || e.code === 'KeyS') { pauseSel ^= 1; menuBlip(); }
+		else if (e.code === 'Enter' || e.code === 'Space') pauseSel ? toMenu() : resume();
+		return;
+	}
+	if ((e.code === 'Escape' || e.code === 'KeyP') && !e.repeat) { state === 'play' ? pause() : toMenu(); return; }
+	if (!e.repeat && state === 'done' && !/^(Shift|Control|Alt|Meta)/.test(e.code) && e.code !== 'KeyM') advance(); // any key moves on
 });
 addEventListener('keyup', e => { if (KMAP[e.code]) keys[KMAP[e.code]] = false; });
 // Floating thumb d-pad: put a thumb down anywhere, slide it. 8 directions; the base follows if you slide past its rim.
@@ -1056,7 +1210,8 @@ function onTouch(e) {
 	e.preventDefault();
 	joy.used = true;
 	audioInit();
-	if (e.type === 'touchstart' && state !== 'play') { advance(); return; }
+	if (e.type === 'touchstart' && state === 'paused') { const t = e.changedTouches[0]; pauseClick(t.clientX, t.clientY); return; }
+	if (e.type === 'touchstart' && state !== 'play') { const t = e.changedTouches[0]; if (onMenuBtn(t.clientX, t.clientY)) toMenu(); else advance(); return; }
 	if (e.type === 'touchstart') { const b = muteBtn(), t = e.changedTouches[0]; if (Math.hypot(t.clientX - b.x, t.clientY - b.y) < b.r) { setMuted(!SFX.muted); return; } }
 	for (const t of e.changedTouches) {
 		if (e.type === 'touchstart') { if (joy.id === null) { joy.id = t.identifier; joy.ox = joy.x = t.clientX; joy.oy = joy.y = t.clientY; } }
@@ -1075,20 +1230,48 @@ for (const ev of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) addEven
 addEventListener('mousedown', e => {
 	audioInit();
 	if (state === 'title') return;
-	if (state !== 'play') return advance();
+	if (state === 'paused') return pauseClick(e.clientX, e.clientY);
+	if (state !== 'play') return onMenuBtn(e.clientX, e.clientY) ? toMenu() : advance();
 	const b = muteBtn(); if (Math.hypot(e.clientX - b.x, e.clientY - b.y) < b.r) setMuted(!SFX.muted);
 });
 function startGame(c) {
 	if (state !== 'title') return;
 	audioInit(); setConfig(c); score = 0; startLevel(1, !!c.boss); state = 'play'; sfx.start();
-	const el = document.getElementById('loader'); el.classList.add('gone'); setTimeout(() => el.remove(), 700);
+	document.getElementById('loader').classList.add('gone'); // hidden, not removed: toMenu() brings it back
 }
 function menuBlip() { audioInit(); tone(988, 0.05, { vol: 0.05 }); tone(1480, 0.07, { vol: 0.04, when: 0.04 }); }
 window.__startGame = startGame; window.__menuBlip = menuBlip;
 function inp(k) { return keys[k] || tkeys[k]; }
+const canDismiss = () => state === 'done' && time - doneAt >= DONE_LOCK;
 function advance() {
-	if (state === 'done') { sfx.start(); startLevel(level + 1); state = 'play'; }
+	if (canDismiss()) { sfx.start(); startLevel(level + 1); state = 'play'; }
 }
+// Esc / P while flying pauses: CONTINUE or MAIN MENU
+let pauseSel = 0;
+function releaseInput() { for (const k in keys) keys[k] = false; for (const k in tkeys) tkeys[k] = false; joy.id = null; }
+function pause() { if (state !== 'play') return; state = 'paused'; pauseSel = 0; releaseInput(); menuBlip(); }
+function resume() { if (state !== 'paused') return; state = 'play'; releaseInput(); menuBlip(); }
+function pauseBtns() { // css px, stacked in the middle of the screen
+	const w = Math.min(280, innerWidth * 0.7), h = Math.max(44, Math.min(60, innerHeight * 0.08)), gap = h * 0.35, x = innerWidth / 2 - w / 2, y = innerHeight * 0.5;
+	return [{ x, y, w, h, label: '▶  CONTINUE' }, { x, y: y + h + gap, w, h, label: '☰  MAIN MENU' }];
+}
+function hitBtn(b, x, y) { return x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h; }
+function pauseClick(x, y) { const [go, menu] = pauseBtns(); if (hitBtn(go, x, y)) resume(); else if (hitBtn(menu, x, y)) toMenu(); }
+function drawBtn(c, b, label, sel) {
+	const x = b.x * DPR, y = b.y * DPR, w = b.w * DPR, h = b.h * DPR;
+	c.fillStyle = sel ? 'rgba(0,70,90,.9)' : 'rgba(10,0,25,.8)'; c.fillRect(x, y, w, h);
+	c.strokeStyle = sel ? '#ffe600' : '#00f0ff'; c.lineWidth = (sel ? 3 : 2) * DPR; c.strokeRect(x, y, w, h);
+	c.fillStyle = sel ? '#fff6b0' : '#bff4ff'; c.font = `bold ${h * 0.4}px sans-serif`; c.textBaseline = 'middle'; c.fillText(label, x + w / 2, y + h / 2); c.textBaseline = 'alphabetic';
+}
+// back to the title menu: from the pause screen, or Esc / the MENU button once the level-clear show has played
+function toMenu() {
+	if (state !== 'paused' && !canDismiss()) return;
+	releaseInput();
+	state = 'title'; startLevel(1); menuBlip();
+	document.getElementById('loader').classList.remove('gone');
+}
+function menuBtn() { const w = Math.min(220, innerWidth * 0.4), h = Math.max(40, Math.min(56, innerHeight * 0.07)); return { x: innerWidth / 2 - w / 2, y: innerHeight * 0.86 - h / 2, w, h }; } // css px
+function onMenuBtn(x, y) { return canDismiss() && hitBtn(menuBtn(), x, y); }
 
 // ---------- physics helpers ----------
 function pointShape(x, y, s) {
@@ -1280,6 +1463,7 @@ function addFloat(x, y, text) { floats.push({ x, y, text, t: 0 }); }
 
 // ---------- update ----------
 function update(dt) {
+	if (state === 'paused') return; // everything freezes, including the clock
 	time += dt;
 	for (const p of particles) { p.vy += G * 0.4 * dt; p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt; }
 	particles = particles.filter(p => p.life > 0);
@@ -1287,6 +1471,7 @@ function update(dt) {
 	floats = floats.filter(f => f.t < 2.2);
 	if (banner && state === 'play') { banner.t -= dt; if (banner.t <= 0) banner = null; }
 	updateSparkles(dt);
+	if (state === 'done' && disco >= 0) try { updateDisco(dt); } catch (err) { console.error('disco', err); disco = -1; } // never let the party block the next level
 	if (state !== 'play') return;
 	updateZoom(dt);
 
@@ -1418,7 +1603,7 @@ function update(dt) {
 
 	// level complete?
 	if (!L.people.some(p => p.state === 'wait' || p.state === 'chain' || p.state === 'free') && !walkers.length && !heli.dead) {
-		state = 'done'; sfx.clear(); if (L.boss) setTimeout(() => sfx.clear(), 1300); // double fanfare for beating the boss
+		state = 'done'; doneAt = time; startDisco(); sfx.clear(); if (L.boss) setTimeout(() => sfx.clear(), 1300); // double fanfare for beating the boss
 	}
 	if (wantCheckpoint && !heli.dead) { checkpoint = snapshot(); wantCheckpoint = false; }
 }
@@ -1661,10 +1846,10 @@ function render() {
 		for (let k = 0; k < 8; k++) { const a = k / 8 * Math.PI + time * 0.12, rx = r * Math.abs(Math.cos(a)); D.i = 0.12 + 0.18 * Math.max(0, Math.sin(a)); if (rx > 4) D.ellipse(cx, cy, rx, r, 0, 72); }
 	}
 	// antenna beacons + hospital lamp
-	for (const b of L.buildings) {
-		if (b.antenna && inView(b.antenna.x, b.antenna.top)) { D.h = N_RED; D.i = Math.sin(time * 3 + b.seed) > 0 ? 1 : 0.15; D.circle(b.antenna.x, b.antenna.top, 2.2, 8); }
-	}
-	for (const hs of L.hosps) if (inView(hs.padX, hs.roofY, 200)) { D.h = N_BLUE; D.i = 0.4 + 0.6 * (Math.sin(time * 8) > 0); D.circle(hs.stair.x + hs.stair.w / 2, hs.stair.y - 3, 2.5, 8); }
+	L.buildings.forEach((b, bi) => {
+		if (b.antenna && inView(b.antenna.x, b.antenna.top)) { D.h = N_RED; D.i = Math.sin(time * 3 + b.seed) > 0 ? 1 : 0.15; D.circle(...danceXY(b.antenna.x, b.antenna.top, b, bi), 2.2, 8); }
+	});
+	for (const hs of L.hosps) if (inView(hs.padX, hs.roofY, 200)) { D.h = N_BLUE; D.i = 0.4 + 0.6 * (Math.sin(time * 8) > 0); D.circle(...danceXY(hs.stair.x + hs.stair.w / 2, hs.stair.y - 3, hs.b, L.buildings.indexOf(hs.b)), 2.5, 8); }
 	// waiting people
 	for (const p of L.people) {
 		if (p.state !== 'wait' || !inView(p.fx, p.fy)) continue;
@@ -1756,17 +1941,18 @@ function drawHud(pulse, urgent) {
 	drawMinimap(c, u);
 	hudU = u;
 	if (L.boss && state === 'play') {
-		// countdown bar over each burning building
-		for (const b of L.buildings) {
-			if (!b.fire || b.fire.state !== 'burning') continue;
+		// countdown bar over each burning building that still has someone waiting on it
+		const occupied = new Set(); for (const p of L.people) if (p.state === 'wait') occupied.add(p.bi);
+		L.buildings.forEach((b, bi) => {
+			if (!b.fire || b.fire.state !== 'burning' || !occupied.has(bi)) return;
 			const top = Math.min(...b.tiers.map(t => t.y)), mx = b.x + b.w / 2;
-			if (!inView(mx, top, 100)) continue;
+			if (!inView(mx, top, 100)) return;
 			const left = 1 - b.fire.t / b.fire.dur, bw = Math.min(b.w, 90) * k, bx = sx(mx) - bw / 2, by = sy(top - 62);
 			c.fillStyle = 'rgba(0,0,0,.55)'; c.fillRect(bx - 2, by - 2, bw + 4, 9 * k / 1.3 + 4);
 			c.fillStyle = left < 0.3 ? (Math.sin(time * 14) > 0 ? '#ff2a55' : '#ffe600') : left < 0.6 ? '#ff8a00' : '#ffe600';
 			c.fillRect(bx, by, bw * left, 9 * k / 1.3);
 			c.font = `bold ${8 * k}px sans-serif`; c.textAlign = 'center'; c.fillStyle = '#ffd0a0'; c.fillText('🔥 ' + Math.ceil(b.fire.dur - b.fire.t) + 's', sx(mx), by - 4 * k);
-		}
+		});
 		// boss bar
 		const total = L.buildings.filter(b => b.fire).length, burning = L.buildings.filter(b => b.fire && b.fire.state === 'burning').length, gone = L.buildings.filter(b => b.fire && b.fire.state === 'out').length;
 		const bw = Math.min(W - 2 * u, u * 30), bx = (W - bw) / 2, by = u * 7.6;
@@ -1793,15 +1979,20 @@ function drawHud(pulse, urgent) {
 	else if (state === 'play' && urgent && !banner) { c.fillStyle = HUDC(pulse); c.font = `bold ${u}px sans-serif`; c.fillText(M.sphere ? 'DRAG THE DOGGO CHAIN ACROSS A HOSPITAL!' : 'HEAD TO THE HOSPITAL — lower them gently onto the roof', W / 2, u * 9); }
 	if (banner && state === 'play') { c.fillStyle = HUDC(Math.min(1, banner.t * 2)); c.font = `bold ${u * 1.8}px sans-serif`; c.fillText(banner.text, W / 2, H * 0.35); }
 
+	const party = state === 'done' && disco >= 0;
 	if (state !== 'play') {
-		c.fillStyle = 'rgba(0,0,0,.72)'; c.fillRect(0, 0, W, H);
-		const lines = state === 'title' ? [] : [
+		if (party) { // keep the show visible: only a soft dark pool behind the text
+			const g = c.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, Math.max(W, H) * 0.45);
+			g.addColorStop(0, 'rgba(0,0,0,.62)'); g.addColorStop(1, 'rgba(0,0,0,0)'); c.fillStyle = g;
+		} else c.fillStyle = 'rgba(0,0,0,.72)';
+		c.fillRect(0, 0, W, H);
+		const lines = state === 'title' ? [] : state === 'paused' ? [['PAUSED', 2.2, 1], ['', 1], ['', 1], ['', 1], ['', 1], ['', 1]] : [
 			[L.boss ? 'INFERNO DEFEATED!' : M.name + ' LEVEL ' + level + ' CLEAR', 2.2, 1],
 			['saved ' + stats.saved + ' / ' + stats.total + '    lost ' + stats.lost + (stats.gone ? '    took the stairs ' + stats.gone : ''), 1.1, 0.8],
 			['crashes ' + crashes + (crashes ? '  (-' + crashes * CRASH_PEN + ')' : ''), 1, 0.8],
 			['SCORE ' + score, 1.4, 1],
 			['', 0.6],
-			['press any key / tap for the next city', 1, 1],
+			canDismiss() ? ['press any key / tap for the next city  ·  ESC for the menu', 1, 1] : ['', 1],
 		];
 		const fit = Math.min(1, W / (u * 40));
 		const total = lines.reduce((s, l) => s + l[1] * 1.5, 0);
@@ -1809,8 +2000,32 @@ function drawHud(pulse, urgent) {
 		for (const [text, sz, a] of lines) {
 			y += sz * 1.5 * u * fit;
 			if (!text) continue;
-			c.fillStyle = HUDC(a); c.font = `${sz > 1.5 ? 'bold ' : ''}${sz * u * fit}px sans-serif`; c.fillText(text, W / 2, y);
+			c.fillStyle = HUDC(a); c.font = `${sz > 1.5 ? 'bold ' : ''}${sz * u * fit}px sans-serif`;
+			if (party && sz > 1.5) { // the headline bounces on the beat in cycling rainbow
+				const k = discoKick(), col = `hsl(${(disco * 140) % 360},100%,70%)`;
+				c.save(); c.translate(W / 2, y); c.scale(1 + 0.08 * k, 1 + 0.08 * k); c.rotate(Math.sin(disco / BEAT * Math.PI * 0.5) * 0.04);
+				c.fillStyle = col; c.fillText(text, 0, 0); c.restore();
+			} else c.fillText(text, W / 2, y);
 		}
+	}
+	if (party) drawStreamers(c);
+	if (canDismiss()) drawBtn(c, menuBtn(), '☰  MAIN MENU', false);
+	if (state === 'paused') pauseBtns().forEach((b, i) => drawBtn(c, b, b.label, i === pauseSel));
+}
+function drawStreamers(c) { // each streamer is one filled ribbon whose width follows its twist
+	for (const s of streamers) {
+		const p = s.pts, n = p.length / 2; if (n < 2) continue;
+		const L = [], R = [];
+		for (let k = 0; k < n; k++) {
+			const a = Math.max(0, k - 1) * 2, b = Math.min(n - 1, k + 1) * 2, dx = p[b] - p[a], dy = p[b + 1] - p[a + 1], d = Math.hypot(dx, dy) || 1;
+			const hw = s.w * 0.5 * (0.2 + 0.8 * Math.abs(Math.cos(s.ph + k * 0.9 + time * 6))), wig = Math.sin(s.ph + k * 1.2 + time * 5) * s.u * 0.8;
+			const x = p[k * 2] + wig, y = p[k * 2 + 1], nx = -dy / d * hw, ny = dx / d * hw;
+			L.push(x + nx, y + ny); R.push(x - nx, y - ny);
+		}
+		c.beginPath(); c.moveTo(L[0], L[1]);
+		for (let k = 2; k < L.length; k += 2) c.lineTo(L[k], L[k + 1]);
+		for (let k = R.length - 2; k >= 0; k -= 2) c.lineTo(R[k], R[k + 1]);
+		c.fillStyle = s.col || (s.col = `hsl(${s.hue | 0},100%,62%)`); c.fill();
 	}
 }
 
@@ -1906,10 +2121,10 @@ function drawMinimap(c, u) {
 startLevel(1);
 let last = performance.now(), acc = 0;
 function frame(now) {
+	requestAnimationFrame(frame); // first, so one bad frame can never freeze the game
 	acc += Math.min(0.05, (now - last) / 1000); last = now;
 	while (acc >= STEP) { update(STEP); acc -= STEP; }
 	render();
-	requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
 window.__loaderReady && window.__loaderReady();
